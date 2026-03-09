@@ -1,12 +1,12 @@
 # streamlit_compvis.py
 # Wildfire prediction demo (5-point cross grid) with:
-# 1) fixed spacing = 2 km
-# 2) user selects the center by clicking on the map (no manual lat/lon input)
-# 3) custom "Loading model…" message instead of "Running load_model_cached()"
-# 4) one-click selection: the marker updates immediately after a single click
-# UI changes:
-# - map starts centered on Québec (province) and zoomed out to show most/all of Québec
-# - sidebar no longer shows "Fixed spacing: 2.0 km"
+# - fixed spacing = 3 km
+# - user selects center by clicking on the map (no manual lat/lon input)
+# - custom "Loading model…" message
+# - one-click selection with immediate rerun
+# - map starts centered on Québec (province) and zoomed out
+# - sidebar does NOT show fixed spacing line
+# - NEW: 3-star (🔥) rating at top of results based on how many of 5 points exceed threshold
 
 import io
 import math
@@ -34,17 +34,18 @@ BEARING = 0
 TILE_SIZE = 350
 RESCALE = 1.0 / 255.0
 
-# Fixed spacing
-SPACING_KM = 2.0
+SPACING_KM = 3.0
 
 WILDFIRE_INDEX = 1
-
 MODEL_PATH = Path("saved_model") / "vgg16_model.keras"
 
-# Default view: Québec (province) — centered and zoomed out further
+# UI defaults: Québec (province)
 DEFAULT_CENTER = (52.0, -71.0)  # lat, lon (approx center of Québec)
-DEFAULT_ZOOM_PICK = 5  # zoomed out to show most/all of Québec
-DEFAULT_ZOOM_RESULT = 6  # a bit closer for the 5-point result view
+DEFAULT_ZOOM_PICK = 5
+DEFAULT_ZOOM_RESULT = 6
+
+# Threshold for "likely to host a forest fire" (match your map coloring logic)
+LIKELY_THRESHOLD = 0.8
 
 
 # ----------------------------
@@ -77,7 +78,7 @@ def build_mapbox_url(lon: float, lat: float, token: str) -> str:
 
 
 def cross5_from_center(lat: float, lon: float):
-    """Exactly 5 points: center + N/S/E/W at fixed 2 km spacing."""
+    """Exactly 5 points: center + N/S/E/W at fixed spacing."""
     dlat = SPACING_KM / 110.574
     dlon = SPACING_KM / (111.320 * math.cos(math.radians(lat)))
 
@@ -115,6 +116,31 @@ def rerun_app():
         st.experimental_rerun()
 
 
+def compute_fire_rating(df: pd.DataFrame, threshold: float = LIKELY_THRESHOLD):
+    """
+    df has p_wildfire column with floats or None.
+    Count how many of the 5 points are "likely" (>= threshold), then map to 0-3 stars.
+    """
+    probs = pd.to_numeric(df.get("p_wildfire"), errors="coerce")
+    likely_count = int((probs >= threshold).sum())
+
+    if likely_count == 0:
+        stars = 0
+        msg = "A fire is unlikely in this environment."
+    elif likely_count == 1:
+        stars = 1
+        msg = "The fire potential of this environment is low."
+    elif likely_count in (2, 3):
+        stars = 2
+        msg = "The fire potential of this environment is moderate. Check local safety precautions."
+    else:  # 4 or 5
+        stars = 3
+        msg = "The fire potential of this environment is high. Check local safety precautions."
+
+    emoji = "🔥" * stars if stars > 0 else "—"
+    return likely_count, stars, emoji, msg
+
+
 # ----------------------------
 # Cached resources
 # ----------------------------
@@ -150,8 +176,8 @@ def fetch_tile(lon: float, lat: float, token: str) -> Image.Image:
 # ----------------------------
 # Streamlit UI
 # ----------------------------
-st.set_page_config(page_title="Wildfire predictor (5-point)", layout="wide")
-st.title("Wildfire prediction (5-point cross grid)")
+st.set_page_config(page_title="Infrastructural Wildfire Likelihood", layout="wide")
+st.title("Infrastructural Wildfire Likelihood")
 
 token = get_mapbox_token()
 
@@ -162,7 +188,6 @@ except Exception as e:
     st.error(f"Failed to load model from {MODEL_PATH}.\n\n{e}")
     st.stop()
 
-# Keep a selected center in session_state
 if "selected_center" not in st.session_state:
     st.session_state["selected_center"] = DEFAULT_CENTER
 
@@ -180,13 +205,10 @@ if clear:
         if k in st.session_state:
             del st.session_state[k]
 
-# --- Map for picking a point ---
 st.subheader(
     "Click on the map to choose the center point (drag to move, click to select)"
 )
 
-# If the user never selected anything yet, start zoomed out on Québec.
-# Otherwise keep the selected marker but still start zoomed out.
 pick_map = folium.Map(
     location=[sel_lat, sel_lon], zoom_start=DEFAULT_ZOOM_PICK, tiles="OpenStreetMap"
 )
@@ -212,7 +234,7 @@ if run:
     rows = []
     imgs = []
 
-    with st.spinner("Downloading tiles + predicting..."):
+    with st.spinner("Downloading satellite images + predicting..."):
         for name, la, lo in pts:
             try:
                 img = fetch_tile(lo, la, token)
@@ -241,6 +263,16 @@ if "df" not in st.session_state:
 df = st.session_state["df"].copy()
 imgs = st.session_state.get("imgs", [])
 
+# --- NEW: Rating block at top of results ---
+likely_count, stars, emoji, msg = compute_fire_rating(df, threshold=LIKELY_THRESHOLD)
+
+st.subheader("Fire potential rating")
+st.markdown(f"### {emoji}")
+st.write(
+    f"**Likely fire tiles:** {likely_count} / 5 (threshold ≥ {LIKELY_THRESHOLD:.1f})"
+)
+st.info(msg)
+
 st.subheader("Results")
 st.dataframe(df, use_container_width=True)
 
@@ -251,7 +283,7 @@ st.download_button(
     mime="text/csv",
 )
 
-st.subheader("Tiles (sanity check)")
+st.subheader("Satellite Images")
 if imgs:
     cols = st.columns(5)
     for i, (name, la, lo, p, img) in enumerate(imgs):
@@ -279,7 +311,7 @@ for _, row in df.iterrows():
         popup = f"{row['point']}: error"
     else:
         p = float(p)
-        color = "red" if p >= 0.8 else "blue"
+        color = "red" if p >= LIKELY_THRESHOLD else "blue"
         popup = f"{row['point']}: p={p:.3f}"
 
     CircleMarker(
