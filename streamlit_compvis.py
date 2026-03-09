@@ -1,9 +1,12 @@
 # streamlit_compvis.py
 # Wildfire prediction demo (5-point cross grid) with:
-# 1) fixed spacing = 1 km
+# 1) fixed spacing = 2 km
 # 2) user selects the center by clicking on the map (no manual lat/lon input)
 # 3) custom "Loading model…" message instead of "Running load_model_cached()"
 # 4) one-click selection: the marker updates immediately after a single click
+# UI changes:
+# - map starts centered on Québec (province) and zoomed out to show most/all of Québec
+# - sidebar no longer shows "Fixed spacing: 2.0 km"
 
 import io
 import math
@@ -31,14 +34,17 @@ BEARING = 0
 TILE_SIZE = 350
 RESCALE = 1.0 / 255.0
 
-# Fixed spacing (per your request)
+# Fixed spacing
 SPACING_KM = 2.0
 
-# If your model is 2-class softmax and class_indices was {'nowildfire': 0, 'wildfire': 1}
 WILDFIRE_INDEX = 1
 
-# Path to your .keras model file inside the repo
 MODEL_PATH = Path("saved_model") / "vgg16_model.keras"
+
+# Default view: Québec (province) — centered and zoomed out further
+DEFAULT_CENTER = (52.0, -71.0)  # lat, lon (approx center of Québec)
+DEFAULT_ZOOM_PICK = 5  # zoomed out to show most/all of Québec
+DEFAULT_ZOOM_RESULT = 6  # a bit closer for the 5-point result view
 
 
 # ----------------------------
@@ -86,7 +92,6 @@ def cross5_from_center(lat: float, lon: float):
 
 
 def preprocess_pil(img: Image.Image) -> np.ndarray:
-    # match ImageDataGenerator(dtype='float32', rescale=1./255.) — no resizing
     x = np.asarray(img, dtype=np.float32) * RESCALE
     return np.expand_dims(x, axis=0)  # (1, 350, 350, 3)
 
@@ -104,7 +109,6 @@ def predict_wildfire_prob(model, img: Image.Image) -> float:
 
 
 def rerun_app():
-    # Streamlit renamed experimental_rerun -> rerun; this works across versions.
     if hasattr(st, "rerun"):
         st.rerun()
     else:
@@ -151,16 +155,12 @@ st.title("Wildfire prediction (5-point cross grid)")
 
 token = get_mapbox_token()
 
-# Load model once (cached) with custom message
 try:
     with st.spinner("Loading model…"):
         model = load_model_cached()
 except Exception as e:
     st.error(f"Failed to load model from {MODEL_PATH}.\n\n{e}")
     st.stop()
-
-# Default map center (lat, lon).
-DEFAULT_CENTER = (50.33874, -64.84903)
 
 # Keep a selected center in session_state
 if "selected_center" not in st.session_state:
@@ -170,7 +170,6 @@ sel_lat, sel_lon = st.session_state["selected_center"]
 
 with st.sidebar:
     st.header("Pick a location")
-    st.write(f"**Fixed spacing:** {SPACING_KM:.1f} km")
     st.write("Click once on the map to set the center point.")
     st.write(f"**Selected:** lat `{sel_lat:.6f}`, lon `{sel_lon:.6f}`")
     run = st.button("Run prediction", type="primary")
@@ -185,15 +184,16 @@ if clear:
 st.subheader(
     "Click on the map to choose the center point (drag to move, click to select)"
 )
-pick_map = folium.Map(location=[sel_lat, sel_lon], zoom_start=10, tiles="OpenStreetMap")
+
+# If the user never selected anything yet, start zoomed out on Québec.
+# Otherwise keep the selected marker but still start zoomed out.
+pick_map = folium.Map(
+    location=[sel_lat, sel_lon], zoom_start=DEFAULT_ZOOM_PICK, tiles="OpenStreetMap"
+)
 Marker(location=[sel_lat, sel_lon], popup="Selected center").add_to(pick_map)
 
 picked = st_folium(pick_map, width=900, height=520, key="pick_map")
 
-# ✅ One-click selection fix:
-# st_folium returns last_clicked AFTER the map is rendered.
-# So we update session_state and immediately rerun the app,
-# which redraws the map with the marker at the new location.
 if picked and picked.get("last_clicked"):
     new_lat = float(picked["last_clicked"]["lat"])
     new_lon = float(picked["last_clicked"]["lng"])
@@ -203,7 +203,6 @@ if picked and picked.get("last_clicked"):
         st.session_state["selected_center"] = new_center
         rerun_app()
 
-# refresh local variables after any rerun-update
 sel_lat, sel_lon = st.session_state["selected_center"]
 
 # --- Run prediction and STORE results ---
@@ -234,7 +233,7 @@ if run:
     st.session_state["df"] = pd.DataFrame(rows)
     st.session_state["imgs"] = imgs
 
-# --- Display stored results (so they don't disappear on reruns) ---
+# --- Display stored results ---
 if "df" not in st.session_state:
     st.info("Click a point on the map, then press **Run prediction**.")
     st.stop()
@@ -266,7 +265,9 @@ else:
     )
 
 st.subheader("Prediction map (5 points)")
-m = folium.Map(location=[sel_lat, sel_lon], zoom_start=11, tiles="OpenStreetMap")
+m = folium.Map(
+    location=[sel_lat, sel_lon], zoom_start=DEFAULT_ZOOM_RESULT, tiles="OpenStreetMap"
+)
 
 for _, row in df.iterrows():
     la = float(row["lat"])
