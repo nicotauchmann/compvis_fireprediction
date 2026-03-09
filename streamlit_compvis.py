@@ -1,5 +1,7 @@
 # streamlit_compvis.py
-# 5-point wildfire prediction demo (center + N/S/E/W) using Mapbox satellite tiles + your trained Keras model
+# Wildfire prediction demo (5-point cross grid) with:
+# 1) fixed spacing = 1 km
+# 2) user selects the center by clicking on the map (no manual lat/lon input)
 
 import io
 import math
@@ -12,7 +14,7 @@ import streamlit as st
 from PIL import Image
 
 import folium
-from folium import CircleMarker
+from folium import CircleMarker, Marker
 from streamlit_folium import st_folium
 
 
@@ -27,6 +29,9 @@ BEARING = 0
 TILE_SIZE = 350
 RESCALE = 1.0 / 255.0
 
+# Fixed spacing (per your request)
+SPACING_KM = 1.0
+
 # If your model is 2-class softmax and class_indices was {'nowildfire': 0, 'wildfire': 1}
 WILDFIRE_INDEX = 1
 
@@ -38,21 +43,11 @@ MODEL_PATH = Path("saved_model") / "vgg16_model.keras"
 # Helpers
 # ----------------------------
 def get_mapbox_token() -> str:
-    # Prefer Streamlit secrets, fall back to environment
     token = st.secrets.get("MAPBOX_ACCESS_TOKEN", "")
-    if not token:
-        token = st.session_state.get("_env_token", "")  # internal, just in case
-    if not token:
-        token = st.experimental_get_query_params().get("MAPBOX_ACCESS_TOKEN", [""])[0]
-    if not token:
-        token = ""  # keep explicit
-
-    # fallback to env var if present
     if not token:
         import os
 
         token = os.getenv("MAPBOX_ACCESS_TOKEN", "")
-
     token = (token or "").strip()
     if not token:
         st.error(
@@ -65,7 +60,6 @@ def get_mapbox_token() -> str:
 
 
 def build_mapbox_url(lon: float, lat: float, token: str) -> str:
-    # match dataset script: round to 6 decimals, lon,lat order, zoom=15, bearing=0, size=350x350, logo/attrib off
     lon = round(float(lon), 6)
     lat = round(float(lat), 6)
     base = f"https://api.mapbox.com/styles/v1/{STYLE_USER}/{STYLE_ID}/static/"
@@ -74,14 +68,10 @@ def build_mapbox_url(lon: float, lat: float, token: str) -> str:
     return base + coords + rest
 
 
-def cross5_from_center(lat: float, lon: float, spacing_km: float = 1.0):
-    """
-    Returns exactly 5 (name, lat, lon) points:
-      center, north, south, east, west
-    with ~spacing_km distance from center.
-    """
-    dlat = spacing_km / 110.574
-    dlon = spacing_km / (111.320 * math.cos(math.radians(lat)))
+def cross5_from_center(lat: float, lon: float):
+    """Exactly 5 points: center + N/S/E/W at fixed 1 km spacing."""
+    dlat = SPACING_KM / 110.574
+    dlon = SPACING_KM / (111.320 * math.cos(math.radians(lat)))
 
     pts = [
         ("center", lat, lon),
@@ -90,7 +80,6 @@ def cross5_from_center(lat: float, lon: float, spacing_km: float = 1.0):
         ("east", lat, lon + dlon),
         ("west", lat, lon - dlon),
     ]
-    # round like dataset
     return [(name, round(la, 6), round(lo, 6)) for name, la, lo in pts]
 
 
@@ -104,10 +93,10 @@ def predict_wildfire_prob(model, img: Image.Image) -> float:
     x = preprocess_pil(img)
     y = np.array(model.predict(x, verbose=0))
 
-    if y.ndim == 2 and y.shape[1] == 2:  # softmax 2-class
-        return float(y[0, WILDFIRE_INDEX])
-    if y.ndim == 2 and y.shape[1] == 1:  # sigmoid 1-unit
-        return float(y[0, 0])
+    if y.ndim == 2 and y.shape[1] == 2:
+        return float(y[0, WILDFIRE_INDEX])  # softmax 2-class
+    if y.ndim == 2 and y.shape[1] == 1:
+        return float(y[0, 0])  # sigmoid 1-unit
 
     raise ValueError(f"Unexpected model output shape: {y.shape}")
 
@@ -124,8 +113,6 @@ def load_model_cached():
 
     if not MODEL_PATH.exists():
         raise FileNotFoundError(f"Model file not found: {MODEL_PATH.resolve()}")
-
-    # loads a .keras model file
     return tf.keras.models.load_model(MODEL_PATH)
 
 
@@ -154,28 +141,52 @@ st.title("Wildfire prediction (5-point cross grid)")
 
 token = get_mapbox_token()
 
-# Load model once (cached)
 try:
     model = load_model_cached()
 except Exception as e:
     st.error(f"Failed to load model from {MODEL_PATH}.\n\n{e}")
     st.stop()
 
-# Sidebar form (prevents rerun spam while editing)
-with st.sidebar:
-    st.header("Inputs")
-    with st.form("params"):
-        # explicit lon/lat inputs
-        lon = st.number_input("Center longitude", value=-64.84903, format="%.6f")
-        lat = st.number_input("Center latitude", value=50.33874, format="%.6f")
-        spacing_km = st.slider(
-            "Spacing (km)", min_value=0.5, max_value=10.0, value=1.0, step=0.5
-        )
-        submitted = st.form_submit_button("Run prediction")
+# Default map center (lat, lon). Change if you want.
+DEFAULT_CENTER = (50.33874, -64.84903)
 
-# Run + store results in session_state so they don't disappear after reruns
-if submitted:
-    pts = cross5_from_center(lat, lon, spacing_km=spacing_km)
+# Keep a selected center in session_state
+if "selected_center" not in st.session_state:
+    st.session_state["selected_center"] = DEFAULT_CENTER
+
+sel_lat, sel_lon = st.session_state["selected_center"]
+
+with st.sidebar:
+    st.header("Pick a location")
+    st.write(f"**Fixed spacing:** {SPACING_KM:.1f} km")
+    st.write("Click on the map to set the center point.")
+    st.write(f"**Selected:** lat `{sel_lat:.6f}`, lon `{sel_lon:.6f}`")
+    run = st.button("Run prediction", type="primary")
+    clear = st.button("Clear results")
+
+if clear:
+    for k in ["df", "imgs"]:
+        if k in st.session_state:
+            del st.session_state[k]
+
+# --- Map for picking a point ---
+st.subheader("Click on the map to choose the center point")
+pick_map = folium.Map(location=[sel_lat, sel_lon], zoom_start=10, tiles="OpenStreetMap")
+Marker(location=[sel_lat, sel_lon], popup="Selected center").add_to(pick_map)
+
+picked = st_folium(pick_map, width=900, height=520, key="pick_map")
+
+# Update selection if user clicked
+if picked and picked.get("last_clicked"):
+    st.session_state["selected_center"] = (
+        picked["last_clicked"]["lat"],
+        picked["last_clicked"]["lng"],
+    )
+    sel_lat, sel_lon = st.session_state["selected_center"]
+
+# --- Run prediction and STORE results ---
+if run:
+    pts = cross5_from_center(sel_lat, sel_lon)
 
     rows = []
     imgs = []
@@ -200,17 +211,14 @@ if submitted:
 
     st.session_state["df"] = pd.DataFrame(rows)
     st.session_state["imgs"] = imgs
-    st.session_state["center"] = (lat, lon)
-    st.session_state["spacing_km"] = spacing_km
 
-# Display last results if available
+# --- Display stored results (so they don't disappear on reruns) ---
 if "df" not in st.session_state:
-    st.info("Set lon/lat (and spacing), then click **Run prediction**.")
+    st.info("Click a point on the map, then press **Run prediction**.")
     st.stop()
 
 df = st.session_state["df"].copy()
 imgs = st.session_state.get("imgs", [])
-center_lat, center_lon = st.session_state.get("center", (lat, lon))
 
 st.subheader("Results")
 st.dataframe(df, use_container_width=True)
@@ -222,7 +230,6 @@ st.download_button(
     mime="text/csv",
 )
 
-# Tiles
 st.subheader("Tiles (sanity check)")
 if imgs:
     cols = st.columns(5)
@@ -236,11 +243,9 @@ else:
         "No images were produced (all fetch/predict steps failed). Check errors in the table above."
     )
 
-# Map
-st.subheader("Map")
-m = folium.Map(location=[center_lat, center_lon], zoom_start=11, tiles="OpenStreetMap")
+st.subheader("Prediction map (5 points)")
+m = folium.Map(location=[sel_lat, sel_lon], zoom_start=11, tiles="OpenStreetMap")
 
-# Draw points
 for _, row in df.iterrows():
     la = float(row["lat"])
     lo = float(row["lon"])
@@ -263,4 +268,4 @@ for _, row in df.iterrows():
         popup=popup,
     ).add_to(m)
 
-st_folium(m, width=900, height=520)
+st_folium(m, width=900, height=520, key="result_map")
