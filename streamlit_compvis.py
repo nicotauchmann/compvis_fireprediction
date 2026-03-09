@@ -32,7 +32,7 @@ TILE_SIZE = 350
 RESCALE = 1.0 / 255.0
 
 # Fixed spacing (per your request)
-SPACING_KM = 1.0
+SPACING_KM = 2.0
 
 # If your model is 2-class softmax and class_indices was {'nowildfire': 0, 'wildfire': 1}
 WILDFIRE_INDEX = 1
@@ -71,7 +71,7 @@ def build_mapbox_url(lon: float, lat: float, token: str) -> str:
 
 
 def cross5_from_center(lat: float, lon: float):
-    """Exactly 5 points: center + N/S/E/W at fixed 1 km spacing."""
+    """Exactly 5 points: center + N/S/E/W at fixed 2 km spacing."""
     dlat = SPACING_KM / 110.574
     dlon = SPACING_KM / (111.320 * math.cos(math.radians(lat)))
 
@@ -153,7 +153,7 @@ token = get_mapbox_token()
 
 # Load model once (cached) with custom message
 try:
-    with st.spinner("Loading model… (first run only)"):
+    with st.spinner("Loading model…"):
         model = load_model_cached()
 except Exception as e:
     st.error(f"Failed to load model from {MODEL_PATH}.\n\n{e}")
@@ -182,7 +182,9 @@ if clear:
             del st.session_state[k]
 
 # --- Map for picking a point ---
-st.subheader("Click on the map to choose the center point (single click)")
+st.subheader(
+    "Click on the map to choose the center point (drag to move, click to select)"
+)
 pick_map = folium.Map(location=[sel_lat, sel_lon], zoom_start=10, tiles="OpenStreetMap")
 Marker(location=[sel_lat, sel_lon], popup="Selected center").add_to(pick_map)
 
@@ -276,7 +278,7 @@ for _, row in df.iterrows():
         popup = f"{row['point']}: error"
     else:
         p = float(p)
-        color = "red" if p >= 0.5 else "blue"
+        color = "red" if p >= 0.8 else "blue"
         popup = f"{row['point']}: p={p:.3f}"
 
     CircleMarker(
