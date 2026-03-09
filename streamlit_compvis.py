@@ -2,6 +2,8 @@
 # Wildfire prediction demo (5-point cross grid) with:
 # 1) fixed spacing = 1 km
 # 2) user selects the center by clicking on the map (no manual lat/lon input)
+# 3) custom "Loading model…" message instead of "Running load_model_cached()"
+# 4) one-click selection: the marker updates immediately after a single click
 
 import io
 import math
@@ -101,13 +103,21 @@ def predict_wildfire_prob(model, img: Image.Image) -> float:
     raise ValueError(f"Unexpected model output shape: {y.shape}")
 
 
+def rerun_app():
+    # Streamlit renamed experimental_rerun -> rerun; this works across versions.
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
+
 # ----------------------------
 # Cached resources
 # ----------------------------
 SESSION = requests.Session()
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_model_cached():
     import tensorflow as tf
 
@@ -141,13 +151,15 @@ st.title("Wildfire prediction (5-point cross grid)")
 
 token = get_mapbox_token()
 
+# Load model once (cached) with custom message
 try:
-    model = load_model_cached()
+    with st.spinner("Loading model… (first run only)"):
+        model = load_model_cached()
 except Exception as e:
     st.error(f"Failed to load model from {MODEL_PATH}.\n\n{e}")
     st.stop()
 
-# Default map center (lat, lon). Change if you want.
+# Default map center (lat, lon).
 DEFAULT_CENTER = (50.33874, -64.84903)
 
 # Keep a selected center in session_state
@@ -159,7 +171,7 @@ sel_lat, sel_lon = st.session_state["selected_center"]
 with st.sidebar:
     st.header("Pick a location")
     st.write(f"**Fixed spacing:** {SPACING_KM:.1f} km")
-    st.write("Click on the map to set the center point.")
+    st.write("Click once on the map to set the center point.")
     st.write(f"**Selected:** lat `{sel_lat:.6f}`, lon `{sel_lon:.6f}`")
     run = st.button("Run prediction", type="primary")
     clear = st.button("Clear results")
@@ -170,19 +182,27 @@ if clear:
             del st.session_state[k]
 
 # --- Map for picking a point ---
-st.subheader("Click on the map to choose the center point")
+st.subheader("Click on the map to choose the center point (single click)")
 pick_map = folium.Map(location=[sel_lat, sel_lon], zoom_start=10, tiles="OpenStreetMap")
 Marker(location=[sel_lat, sel_lon], popup="Selected center").add_to(pick_map)
 
 picked = st_folium(pick_map, width=900, height=520, key="pick_map")
 
-# Update selection if user clicked
+# ✅ One-click selection fix:
+# st_folium returns last_clicked AFTER the map is rendered.
+# So we update session_state and immediately rerun the app,
+# which redraws the map with the marker at the new location.
 if picked and picked.get("last_clicked"):
-    st.session_state["selected_center"] = (
-        picked["last_clicked"]["lat"],
-        picked["last_clicked"]["lng"],
-    )
-    sel_lat, sel_lon = st.session_state["selected_center"]
+    new_lat = float(picked["last_clicked"]["lat"])
+    new_lon = float(picked["last_clicked"]["lng"])
+    new_center = (round(new_lat, 6), round(new_lon, 6))
+
+    if new_center != st.session_state["selected_center"]:
+        st.session_state["selected_center"] = new_center
+        rerun_app()
+
+# refresh local variables after any rerun-update
+sel_lat, sel_lon = st.session_state["selected_center"]
 
 # --- Run prediction and STORE results ---
 if run:
