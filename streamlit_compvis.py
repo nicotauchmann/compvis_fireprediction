@@ -130,24 +130,20 @@ def predict_wildfire_prob(model, img: Image.Image) -> float:
 st.set_page_config(page_title="Wildfire map predictor (5-point)", layout="wide")
 st.title("Wildfire prediction (5-point cross grid)")
 
+# --- Sidebar inputs in a form (prevents reruns while editing) ---
 with st.sidebar:
     st.header("Inputs")
-    # you provide lon,lat often; UI keeps them explicit
-    lon = st.number_input("Center longitude", value=-64.84903, format="%.6f")
-    lat = st.number_input("Center latitude", value=50.33874, format="%.6f")
-    spacing_km = st.slider(
-        "Spacing (km)", min_value=0.5, max_value=10.0, value=1.0, step=0.5
-    )
-    run = st.button("Run prediction", type="primary")
+    with st.form("params"):
+        lon = st.number_input("Center longitude", value=-64.84903, format="%.6f")
+        lat = st.number_input("Center latitude", value=50.33874, format="%.6f")
+        spacing_km = st.slider("Spacing (km)", 0.5, 10.0, 1.0, 0.5)
+        submitted = st.form_submit_button("Run prediction")
 
-model = load_model()
-
-if run:
+# --- Run and STORE results once when submitted ---
+if submitted:
     pts = cross5_from_center(lat, lon, spacing_km=spacing_km)
 
-    rows = []
-    imgs = []
-
+    rows, imgs = [], []
     with st.spinner("Downloading tiles + predicting..."):
         for name, la, lo in pts:
             img = fetch_tile(lo, la)
@@ -155,16 +151,18 @@ if run:
             rows.append({"point": name, "lat": la, "lon": lo, "p_wildfire": p})
             imgs.append((name, la, lo, p, img))
 
-    df = pd.DataFrame(rows).sort_values("point")
+    st.session_state["df"] = pd.DataFrame(rows).sort_values("point")
+    st.session_state["imgs"] = imgs
+    st.session_state["center"] = (lat, lon)
+
+# --- Display: show stored results if they exist ---
+if "df" in st.session_state:
+    df = st.session_state["df"]
+    imgs = st.session_state["imgs"]
+    lat, lon = st.session_state["center"]
+
     st.subheader("Results")
     st.dataframe(df, use_container_width=True)
-
-    st.download_button(
-        "Download CSV",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name="wildfire_predictions_5points.csv",
-        mime="text/csv",
-    )
 
     st.subheader("Tiles (sanity check)")
     cols = st.columns(5)
@@ -177,20 +175,6 @@ if run:
             )
 
     st.subheader("Map")
-    m = folium.Map(location=[lat, lon], zoom_start=11, tiles="OpenStreetMap")
-
-    for name, la, lo, p, _img in imgs:
-        # simple color rule for readability
-        color = "red" if p >= 0.5 else "blue"
-        CircleMarker(
-            location=(la, lo),
-            radius=10,
-            color=color,
-            fill=True,
-            fill_opacity=0.7,
-            popup=f"{name}: p={p:.3f}",
-        ).add_to(m)
-
-    st_folium(m, width=900, height=500)
+    # ... your folium code here ...
 else:
     st.info("Set lon/lat (and spacing), then click **Run prediction**.")
